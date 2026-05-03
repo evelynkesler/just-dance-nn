@@ -1,0 +1,19 @@
+[project]
+name = "just-dance-nn"
+version = "0.1.0"
+description = "Just Dance NN - clon educativo basado en pose estimation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mediapipe>=0.10.35",
+    "numpy>=2.4.4",
+    "opencv-python>=4.13.0.92",
+    "yt-dlp>=2026.3.17",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/just_dance_nn"]

@@ -1,0 +1,31 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Modelos de MediaPipe (se descargan con scripts/download_model.py)
+models/*.task
+
+# Referencias pre-extraidas (se regeneran con extract_reference.py)
+references/*.npz
+
+# Videos de baile (no se redistribuyen por copyright)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.crdownload
+
+# IDE / SO
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
