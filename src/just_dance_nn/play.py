@@ -16,24 +16,23 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from pathlib import Path
+import sys
 import time
 
 import cv2
-import mediapipe as mp
 import numpy as np
-from mediapipe.tasks import python as mp_python
-from mediapipe.tasks.python import vision as mp_vision
 
+from just_dance_nn.pose_backends import create_detector
 from just_dance_nn.pose_compare import (
-    NUM_LANDMARKS,
+    NUM_KEYPOINTS,
+    POSE_CONNECTIONS,
+    VIS_IDX,
     compare_poses,
-    landmarks_to_array,
     mirror_pose,
     score_to_label,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MODEL_PATH = PROJECT_ROOT / "models" / "pose_landmarker_lite.task"
 
 # Layout
 PANEL_W = 640
@@ -59,16 +58,6 @@ LABEL_COLORS = {
     "MISS":    (90, 90, 255),
 }
 
-POSE_CONNECTIONS = [
-    (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
-    (11, 23), (12, 24), (23, 24),
-    (23, 25), (25, 27), (27, 29), (29, 31), (27, 31),
-    (24, 26), (26, 28), (28, 30), (30, 32), (28, 32),
-    (15, 17), (15, 19), (15, 21), (17, 19),
-    (16, 18), (16, 20), (16, 22), (18, 20),
-]
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Motor Just Dance NN")
     parser.add_argument("video", type=Path)
@@ -78,6 +67,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cam-index", type=int, default=0)
     parser.add_argument("--countdown", type=int, default=3)
     parser.add_argument("--no-mirror", action="store_true")
+    parser.add_argument("--backend", choices=["mediapipe", "posenet"], default="mediapipe",
+                        help="Detector de pose: mediapipe (CPU, Mac/PC) o posenet (GPU, Jetson)")
+    parser.add_argument("--model-complexity", choices=["lite", "full", "heavy"], default="lite",
+                        help="Solo para backend mediapipe")
     return parser.parse_args()
 
 
@@ -147,8 +140,8 @@ def draw_skeleton_glow(img: np.ndarray, landmarks: np.ndarray, base_color, glow_
     """Esqueleto con efecto glow: capa exterior gruesa difusa + interior fina nitida."""
     h, w = img.shape[:2]
     pts: list[tuple[int, int] | None] = []
-    for i in range(NUM_LANDMARKS):
-        if landmarks[i, 3] > 0.3:
+    for i in range(NUM_KEYPOINTS):
+        if landmarks[i, VIS_IDX] > 0.3:
             pts.append((int(landmarks[i, 0] * w), int(landmarks[i, 1] * h)))
         else:
             pts.append(None)
@@ -438,8 +431,6 @@ def main() -> None:
         raise SystemExit(f"No existe el video: {args.video}")
     if not args.reference.exists():
         raise SystemExit(f"No existe la referencia: {args.reference}")
-    if not MODEL_PATH.exists():
-        raise SystemExit(f"No existe el modelo: {MODEL_PATH}")
 
     data = np.load(args.reference, allow_pickle=True)
     ref_landmarks = data["landmarks"]
@@ -461,22 +452,19 @@ def main() -> None:
         cap_ref.set(cv2.CAP_PROP_POS_FRAMES, start_frame_video)
     total_duration = ref_frame_count / ref_fps
 
-    cap_cam = cv2.VideoCapture(args.cam_index, cv2.CAP_DSHOW)
+    cap_cam = (
+        cv2.VideoCapture(args.cam_index, cv2.CAP_DSHOW)
+        if sys.platform == "win32"
+        else cv2.VideoCapture(args.cam_index)
+    )
     if not cap_cam.isOpened():
         raise SystemExit("No se pudo abrir la webcam")
     cap_cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap_cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-    base_options = mp_python.BaseOptions(model_asset_path=str(MODEL_PATH))
-    options = mp_vision.PoseLandmarkerOptions(
-        base_options=base_options,
-        running_mode=mp_vision.RunningMode.VIDEO,
-        num_poses=1,
-        min_pose_detection_confidence=0.5,
-        min_pose_presence_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
-    landmarker = mp_vision.PoseLandmarker.create_from_options(options)
+    detector = create_detector(args.backend, num_poses=1,
+                               model_complexity=args.model_complexity)
+    print(f"Detector de pose: {args.backend}")
 
     cv2.namedWindow("Just Dance NN", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Just Dance NN", WINDOW_W, WINDOW_H)
@@ -527,16 +515,14 @@ def main() -> None:
             break
         cam_frame = cv2.flip(cam_frame, 1)
 
-        rgb = cv2.cvtColor(cam_frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         ts_ms = int(elapsed * 1000)
-        result = landmarker.detect_for_video(mp_image, ts_ms)
+        player_poses = detector.detect(cam_frame, ts_ms)
 
         current_score = 0.0
         instant_label = "MISS"
         player_array = None
-        if result.pose_landmarks:
-            player_array = landmarks_to_array(result.pose_landmarks[0])
+        if player_poses:
+            player_array = player_poses[0]
             ref_array = ref_landmarks[ref_idx]
             fs = compare_poses(player_array, ref_array)
             if fs.valid:
@@ -549,7 +535,7 @@ def main() -> None:
         avg_score = float(np.mean(score_history)) if score_history else 0.0
 
         # Combo: avanza si el label es GOOD o mejor (score >= 55)
-        if instant_label in ("GOOD", "GREAT", "PERFECT") and result.pose_landmarks:
+        if instant_label in ("GOOD", "GREAT", "PERFECT") and player_poses:
             combo += 1
             max_combo = max(max_combo, combo)
         else:
@@ -620,7 +606,7 @@ def main() -> None:
 
     cap_ref.release()
     cap_cam.release()
-    landmarker.close()
+    detector.close()
     cv2.destroyAllWindows()
 
 

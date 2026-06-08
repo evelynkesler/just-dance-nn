@@ -20,14 +20,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from just_dance_nn.pose_compare import NUM_LANDMARKS
-
-POSE_CONNECTIONS = [
-    (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
-    (11, 23), (12, 24), (23, 24),
-    (23, 25), (25, 27), (27, 29), (29, 31), (27, 31),
-    (24, 26), (26, 28), (28, 30), (30, 32), (28, 32),
-]
+from just_dance_nn.pose_compare import NUM_KEYPOINTS, POSE_CONNECTIONS, VIS_IDX
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,8 +34,8 @@ def parse_args() -> argparse.Namespace:
 def draw_pose(img: np.ndarray, pose: np.ndarray) -> None:
     h, w = img.shape[:2]
     points: list[tuple[int, int] | None] = []
-    for i in range(NUM_LANDMARKS):
-        if pose[i, 3] > 0.3:
+    for i in range(NUM_KEYPOINTS):
+        if pose[i, VIS_IDX] > 0.3:
             points.append((int(pose[i, 0] * w), int(pose[i, 1] * h)))
         else:
             points.append(None)

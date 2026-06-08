@@ -1,9 +1,14 @@
 """
-Extrae landmarks de pose de un video de referencia, trackeando UNA persona
+Extrae keypoints de pose de un video de referencia, trackeando UNA persona
 especifica (el bailarin principal) a lo largo de todo el video.
 
+Funciona con cualquier backend de deteccion (ver pose_backends.py): por defecto
+MediaPipe (CPU), o PoseNet en la Jetson con --backend posenet. La salida es
+siempre en formato canonico de 13 keypoints, asi la referencia sirve igual para
+los dos detectores.
+
 Estrategia:
-    1. Procesa el primer frame con deteccion multi-persona (num_poses=4).
+    1. Procesa el primer frame con deteccion multi-persona.
     2. Muestra ese frame con cada bailarin numerado y pide al usuario que
        click sobre el principal.
     3. Para los frames siguientes, asocia cada deteccion a la persona trackeada
@@ -22,30 +27,34 @@ from pathlib import Path
 import time
 
 import cv2
-import mediapipe as mp
 import numpy as np
-from mediapipe.tasks import python as mp_python
-from mediapipe.tasks.python import vision as mp_vision
 
-from just_dance_nn.pose_compare import landmarks_to_array, NUM_LANDMARKS
+from just_dance_nn.pose_backends import create_detector
+from just_dance_nn.pose_compare import (
+    L_HIP,
+    NUM_KEYPOINTS,
+    POSE_CONNECTIONS,
+    R_HIP,
+    VIS_IDX,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MODEL_PATH = PROJECT_ROOT / "models" / "pose_landmarker_lite.task"
 REFERENCES_DIR = PROJECT_ROOT / "references"
 
 NUM_POSES_DETECT = 4   # cuantas personas detectar simultaneamente
-LEFT_HIP = 23
-RIGHT_HIP = 24
 MAX_TRACKING_DIST = 0.20   # distancia maxima (en coords normalizadas) para asociar al tracked
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Extrae landmarks de un video con tracking de bailarin principal")
+    parser = argparse.ArgumentParser(description="Extrae keypoints de un video con tracking de bailarin principal")
     parser.add_argument("video", type=Path)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--preview", action="store_true",
                         help="Muestra ventana con la pose trackeada mientras procesa")
-    parser.add_argument("--model-complexity", choices=["lite", "full", "heavy"], default="lite")
+    parser.add_argument("--backend", choices=["mediapipe", "posenet"], default="mediapipe",
+                        help="Detector de pose: mediapipe (CPU) o posenet (GPU/Jetson)")
+    parser.add_argument("--model-complexity", choices=["lite", "full", "heavy"], default="lite",
+                        help="Solo para backend mediapipe")
     parser.add_argument("--start", type=float, default=0.0)
     parser.add_argument("--end", type=float, default=None)
     parser.add_argument("--auto-center", action="store_true",
@@ -53,26 +62,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def get_model_path(complexity: str) -> Path:
-    filename = f"pose_landmarker_{complexity}.task"
-    path = MODEL_PATH.parent / filename
-    if not path.exists():
-        url = (
-            f"https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-            f"pose_landmarker_{complexity}/float16/latest/{filename}"
-        )
-        print(f"Modelo {complexity} no encontrado. Descargalo desde:\n  {url}")
-        print(f"Y guardalo en: {path}")
-        raise SystemExit(1)
-    return path
-
-
 def pose_centroid(pose: np.ndarray) -> tuple[float, float]:
     """Centroide del bailarin = promedio de caderas (puntos estables)."""
     return (
-        float((pose[LEFT_HIP, 0] + pose[RIGHT_HIP, 0]) / 2),
-        float((pose[LEFT_HIP, 1] + pose[RIGHT_HIP, 1]) / 2),
+        float((pose[L_HIP, 0] + pose[R_HIP, 0]) / 2),
+        float((pose[L_HIP, 1] + pose[R_HIP, 1]) / 2),
     )
+
+
+def draw_basic_skeleton(img: np.ndarray, pose: np.ndarray, color, thickness: int) -> None:
+    """Dibuja el esqueleto canonico sobre la imagen (coords normalizadas)."""
+    h, w = img.shape[:2]
+    for a, b in POSE_CONNECTIONS:
+        if pose[a, VIS_IDX] > 0.3 and pose[b, VIS_IDX] > 0.3:
+            pa = (int(pose[a, 0] * w), int(pose[a, 1] * h))
+            pb = (int(pose[b, 0] * w), int(pose[b, 1] * h))
+            cv2.line(img, pa, pb, color, thickness)
 
 
 def select_target_interactive(frame: np.ndarray, poses: list[np.ndarray]) -> int:
@@ -83,14 +88,7 @@ def select_target_interactive(frame: np.ndarray, poses: list[np.ndarray]) -> int
     colors = [(0, 255, 0), (0, 165, 255), (255, 0, 255), (255, 255, 0)]
     for i, pose in enumerate(poses):
         color = colors[i % len(colors)]
-        # esqueleto basico
-        for a, b in [(11, 12), (11, 23), (12, 24), (23, 24),
-                     (11, 13), (13, 15), (12, 14), (14, 16),
-                     (23, 25), (25, 27), (24, 26), (26, 28)]:
-            if pose[a, 3] > 0.3 and pose[b, 3] > 0.3:
-                pa = (int(pose[a, 0] * w), int(pose[a, 1] * h))
-                pb = (int(pose[b, 0] * w), int(pose[b, 1] * h))
-                cv2.line(overlay, pa, pb, color, 3)
+        draw_basic_skeleton(overlay, pose, color, 3)
         cx, cy = pose_centroid(pose)
         ix, iy = int(cx * w), int(cy * h)
         centroids.append((ix, iy))
@@ -132,28 +130,24 @@ def select_target_interactive(frame: np.ndarray, poses: list[np.ndarray]) -> int
     return selected["idx"]
 
 
-def find_first_frame_with_poses(cap, landmarker, fps, start_frame, end_frame, max_attempts=120):
+def find_first_frame_with_poses(cap, detector, fps, start_frame, end_frame, max_attempts=120):
     """Busca el primer frame donde se detecten poses. Devuelve (frame_idx, frame, poses)."""
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     for offset in range(max_attempts):
         ok, frame = cap.read()
         if not ok:
             return None
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         ts_ms = int(((start_frame + offset) / fps) * 1000)
-        result = landmarker.detect_for_video(mp_image, ts_ms)
-        if result.pose_landmarks:
-            poses = [landmarks_to_array(lms) for lms in result.pose_landmarks]
+        poses = detector.detect(frame, ts_ms)
+        if poses:
             return offset, frame, poses
     return None
 
 
-def extract(video_path: Path, output_path: Path, preview: bool, complexity: str,
-            start_s: float, end_s: float | None, auto_center: bool) -> None:
+def extract(video_path: Path, output_path: Path, preview: bool, backend: str,
+            complexity: str, start_s: float, end_s: float | None, auto_center: bool) -> None:
     if not video_path.exists():
         raise SystemExit(f"Error: el video no existe: {video_path}")
-    model_path = get_model_path(complexity)
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -172,21 +166,13 @@ def extract(video_path: Path, output_path: Path, preview: bool, complexity: str,
 
     print(f"Video: {video_path.name}  ({width}x{height} @ {fps:.2f}fps)")
     print(f"Procesando {frame_count} frames ({duration:.1f}s) con num_poses={NUM_POSES_DETECT}")
-    print(f"Modelo: {complexity}")
+    print(f"Backend: {backend}")
 
-    base_options = mp_python.BaseOptions(model_asset_path=str(model_path))
-    options = mp_vision.PoseLandmarkerOptions(
-        base_options=base_options,
-        running_mode=mp_vision.RunningMode.VIDEO,
-        num_poses=NUM_POSES_DETECT,
-        min_pose_detection_confidence=0.5,
-        min_pose_presence_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
-    landmarker = mp_vision.PoseLandmarker.create_from_options(options)
+    detector = create_detector(backend, num_poses=NUM_POSES_DETECT,
+                               model_complexity=complexity)
 
     # Buscar el primer frame con detecciones para hacer la seleccion
-    first = find_first_frame_with_poses(cap, landmarker, fps, start_frame, end_frame)
+    first = find_first_frame_with_poses(cap, detector, fps, start_frame, end_frame)
     if first is None:
         raise SystemExit("No se detectaron personas en los primeros frames del rango")
     init_offset, init_frame, init_poses = first
@@ -206,7 +192,7 @@ def extract(video_path: Path, output_path: Path, preview: bool, complexity: str,
     # Reset y procesar todo el rango (incluyendo los frames previos al init_offset)
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-    all_landmarks = np.zeros((frame_count, NUM_LANDMARKS, 4), dtype=np.float32)
+    all_landmarks = np.zeros((frame_count, NUM_KEYPOINTS, 3), dtype=np.float32)
     detected_count = 0
     lost_count = 0
     frame_idx = 0
@@ -224,11 +210,8 @@ def extract(video_path: Path, output_path: Path, preview: bool, complexity: str,
         if frame_idx <= init_offset and cached_first[frame_idx] is not None:
             poses = cached_first[frame_idx]  # type: ignore
         else:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             ts_ms = int(((start_frame + frame_idx) / fps) * 1000)
-            result = landmarker.detect_for_video(mp_image, ts_ms)
-            poses = [landmarks_to_array(lms) for lms in result.pose_landmarks] if result.pose_landmarks else []
+            poses = detector.detect(frame, ts_ms)
 
         chosen: np.ndarray | None = None
         if poses:
@@ -247,15 +230,9 @@ def extract(video_path: Path, output_path: Path, preview: bool, complexity: str,
 
         if preview:
             disp = frame.copy()
-            for i, pose in enumerate(poses):
+            for pose in poses:
                 color = (0, 255, 0) if (chosen is not None and pose is chosen) else (80, 80, 80)
-                for a, b in [(11, 12), (11, 23), (12, 24), (23, 24),
-                             (11, 13), (13, 15), (12, 14), (14, 16),
-                             (23, 25), (25, 27), (24, 26), (26, 28)]:
-                    if pose[a, 3] > 0.3 and pose[b, 3] > 0.3:
-                        pa = (int(pose[a, 0] * width), int(pose[a, 1] * height))
-                        pb = (int(pose[b, 0] * width), int(pose[b, 1] * height))
-                        cv2.line(disp, pa, pb, color, 2)
+                draw_basic_skeleton(disp, pose, color, 2)
             cv2.putText(disp, f"Frame {frame_idx + 1}/{frame_count}  trackeado: {detected_count}",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             cv2.imshow("Extraccion (verde=trackeado)", disp)
@@ -271,7 +248,7 @@ def extract(video_path: Path, output_path: Path, preview: bool, complexity: str,
             print(f"  {frame_idx}/{frame_count} ({pct:.1f}%)  trackeado={detected_count}  perdido={lost_count}  ETA {eta:.1f}s")
 
     cap.release()
-    landmarker.close()
+    detector.close()
     if preview:
         cv2.destroyAllWindows()
 
@@ -297,7 +274,7 @@ def extract(video_path: Path, output_path: Path, preview: bool, complexity: str,
 def main() -> None:
     args = parse_args()
     output = args.output or REFERENCES_DIR / f"{args.video.stem}.npz"
-    extract(args.video, output, args.preview, args.model_complexity,
+    extract(args.video, output, args.preview, args.backend, args.model_complexity,
             args.start, args.end, args.auto_center)
 
 
