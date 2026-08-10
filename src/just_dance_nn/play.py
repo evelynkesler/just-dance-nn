@@ -581,11 +581,12 @@ def show_final_screen(total_score, score_history, max_combo,
                     (graph_x0 + 10, graph_y0 - 10),
                     cv2.FONT_HERSHEY_DUPLEX, 0.55, TEXT_DIM, 1, cv2.LINE_AA)
 
-    put_centered_text(canvas, "Presiona cualquier tecla para salir",
+    put_centered_text(canvas, "R = bailar otra vez   |   cualquier otra tecla = salir",
                       WINDOW_H - 25, 0.6, TEXT_DIM, 1)
 
     cv2.imshow("Just Dance NN", canvas)
-    cv2.waitKey(0)
+    key = cv2.waitKey(0) & 0xFF
+    return key in (ord("r"), ord("R"))
 
 
 def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
@@ -846,6 +847,8 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
             fullscreen = not fullscreen
             set_fullscreen("Just Dance NN", fullscreen)
 
+    audio_player.stop()
+
     final_score = float(np.mean(score_history)) if score_history else 0.0
     print(f"Score final: {final_score:.2f}  ({score_to_label(final_score)})  combo max: {max_combo}")
 
@@ -877,14 +880,15 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
         print("  por articulacion: " + " | ".join(segs))
         print(f"  detectada en camara: {100 * detected_frames // total_frames}% del tiempo")
 
-    show_final_screen(final_score, score_history, max_combo,
-                      label_counts=label_counts, joint_sum=joint_sum,
-                      joint_cnt=joint_cnt, detected_frames=detected_frames)
+    retry = show_final_screen(final_score, score_history, max_combo,
+                              label_counts=label_counts, joint_sum=joint_sum,
+                              joint_cnt=joint_cnt, detected_frames=detected_frames)
 
     cap_ref.release()
     cap_cam.release()
     detector.close()
     cv2.destroyAllWindows()
+    return retry
 
 
 # ===========================================================================
@@ -1040,12 +1044,13 @@ def main() -> None:
     # --- Modo directo: se paso un video por linea de comandos ---
     if args.video is not None:
         reference = args.reference or (args.references_dir / f"{args.video.stem}.npz")
-        run_game(args.video, reference, start=args.start, end=args.end,
-                 cam_index=args.cam_index, countdown=args.countdown,
-                 mirror=not args.no_mirror, backend=args.backend,
-                 model_complexity=args.model_complexity,
-                 audio=not args.no_audio, fullscreen=args.fullscreen,
-                 infer_every=args.infer_every, tolerance=args.tolerance)
+        while run_game(args.video, reference, start=args.start, end=args.end,
+                       cam_index=args.cam_index, countdown=args.countdown,
+                       mirror=not args.no_mirror, backend=args.backend,
+                       model_complexity=args.model_complexity,
+                       audio=not args.no_audio, fullscreen=args.fullscreen,
+                       infer_every=args.infer_every, tolerance=args.tolerance):
+            pass   # R en la pantalla final = bailar otra vez
         return
 
     # --- Modo menu: escanea la carpeta de videos en cada vuelta ---
@@ -1069,12 +1074,13 @@ def main() -> None:
                 print(f"No se pudo extraer la referencia: {exc}")
                 continue
 
-        run_game(choice.video, choice.reference, start=args.start, end=args.end,
-                 cam_index=args.cam_index, countdown=args.countdown,
-                 mirror=not args.no_mirror, backend=args.backend,
-                 model_complexity=args.model_complexity,
-                 audio=not args.no_audio, fullscreen=args.fullscreen,
-                 infer_every=args.infer_every, tolerance=args.tolerance)
+        while run_game(choice.video, choice.reference, start=args.start, end=args.end,
+                       cam_index=args.cam_index, countdown=args.countdown,
+                       mirror=not args.no_mirror, backend=args.backend,
+                       model_complexity=args.model_complexity,
+                       audio=not args.no_audio, fullscreen=args.fullscreen,
+                       infer_every=args.infer_every, tolerance=args.tolerance):
+            pass   # R en la pantalla final = bailar otra vez; al salir, vuelve al menu
 
     cv2.destroyAllWindows()
 
