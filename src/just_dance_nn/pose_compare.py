@@ -215,10 +215,17 @@ def precompute_reference(ref_landmarks, visibility_threshold=0.4):
 
 
 def best_score_in_window(player_pose, ref_angles_win, ref_valid_win,
-                         tolerance_degrees=40.0, visibility_threshold=0.4):
+                         tolerance_degrees=45.0, grace_degrees=12.0,
+                         visibility_threshold=0.4):
     """Compara al jugador contra una ventana de frames de referencia
     (angulos pre-calculados) y devuelve el mejor score, o None si ninguna
-    comparacion fue confiable. Vectorizado sobre toda la ventana."""
+    comparacion fue confiable. Vectorizado sobre toda la ventana.
+
+    Curva por articulacion con zona de gracia: un error <= grace_degrees vale
+    100% (el jitter de la red + diferencias de camara producen ~10-15 grados
+    de error de base aunque el paso este clavado); de ahi decae linealmente
+    hasta 0% en tolerance_degrees.
+    """
     player_angles = extract_angles(player_pose)
     player_valid = joints_visibility_mask(player_pose, visibility_threshold)
 
@@ -229,7 +236,8 @@ def best_score_in_window(player_pose, ref_angles_win, ref_valid_win,
         return None
 
     err = np.abs(ref_angles_win - player_angles[None, :])  # (W, A)
-    per_joint = np.clip(1.0 - err / tolerance_degrees, 0.0, 1.0)
+    per_joint = np.clip((tolerance_degrees - err)
+                        / (tolerance_degrees - grace_degrees), 0.0, 1.0)
     sums = (per_joint * valid).sum(axis=1)
     scores = np.where(ok, sums / np.maximum(counts, 1) * 100.0, -1.0)
     best_i = int(np.argmax(scores))
