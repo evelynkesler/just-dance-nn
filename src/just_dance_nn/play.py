@@ -107,16 +107,35 @@ class AudioPlayer:
     def __init__(self, video_path, start_s=0.0, enabled=True):
         self._proc = None
         self._paused = False
-        self._exe = shutil.which("ffplay") if enabled else None
-        if enabled and self._exe is None:
-            print("(sin audio: no se encontro 'ffplay'. Instalar ffmpeg para tener sonido)")
-        self._args = [
-            self._exe or "", "-nodisp", "-autoexit", "-loglevel", "quiet",
-            "-vn", "-ss", str(start_s), "-i", str(video_path),
-        ]
+        self._args = self._build_cmd(video_path, start_s) if enabled else None
+        if enabled and self._args is None:
+            print("(sin audio: no hay ffplay, mpv ni gst-launch-1.0 disponibles. "
+                  "Instalar ffmpeg para tener sonido)")
+
+    @staticmethod
+    def _build_cmd(video_path, start_s):
+        """Arma el comando del reproductor con el primero disponible:
+        ffplay (ffmpeg) -> mpv -> gst-launch-1.0 (GStreamer, presente en el
+        contenedor jetson-inference sin instalar nada)."""
+        ffplay = shutil.which("ffplay")
+        if ffplay:
+            return [ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet",
+                    "-vn", "-ss", str(start_s), "-i", str(video_path)]
+        mpv = shutil.which("mpv")
+        if mpv:
+            return [mpv, "--no-video", "--really-quiet",
+                    "--start=" + str(start_s), str(video_path)]
+        gst = shutil.which("gst-launch-1.0")
+        if gst and start_s < 1.0:
+            # playbin no puede arrancar desde un offset por CLI, asi que solo
+            # sirve cuando el juego arranca desde el principio del video (el
+            # caso del menu en la Jetson, que siempre usa start=0).
+            uri = Path(video_path).resolve().as_uri()
+            return [gst, "-q", "playbin", "uri=" + uri, "video-sink=fakesink"]
+        return None
 
     def start(self):
-        if self._exe is None:
+        if self._args is None:
             return
         try:
             self._proc = subprocess.Popen(
