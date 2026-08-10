@@ -232,7 +232,9 @@ def best_score_in_window(player_pose, ref_angles_win, ref_valid_win,
     per_joint = np.clip(1.0 - err / tolerance_degrees, 0.0, 1.0)
     sums = (per_joint * valid).sum(axis=1)
     scores = np.where(ok, sums / np.maximum(counts, 1) * 100.0, -1.0)
-    return float(scores.max())
+    best_i = int(np.argmax(scores))
+    # (score, score por articulacion 0..1 del mejor frame, mascara de validez)
+    return float(scores[best_i]), per_joint[best_i], valid[best_i]
 
 
 def score_to_label(score: float) -> str:

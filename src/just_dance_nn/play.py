@@ -481,7 +481,13 @@ def draw_star(img, center, radius, filled, color_filled, color_empty):
         cv2.polylines(img, [arr], True, color_empty, 2, cv2.LINE_AA)
 
 
-def show_final_screen(total_score, score_history, max_combo):
+JOINT_GROUPS = [("CODOS", 0, 1), ("HOMBROS", 2, 3),
+                ("CADERAS", 4, 5), ("RODILLAS", 6, 7)]
+
+
+def show_final_screen(total_score, score_history, max_combo,
+                      label_counts=None, joint_sum=None, joint_cnt=None,
+                      detected_frames=0):
     canvas = vertical_gradient(WINDOW_H, WINDOW_W, BG_PANEL, BG_DARK)
 
     put_centered_text(canvas, "RESULTADO FINAL", 90, 1.6, TEXT_PRIMARY, 3)
@@ -506,14 +512,47 @@ def show_final_screen(total_score, score_history, max_combo):
                   ACCENT_CYAN, TEXT_DIM)
 
     # Stats
-    stats_y = 560
-    rounded_rect(canvas, (WINDOW_W // 2 - 350, stats_y - 30),
-                 (WINDOW_W // 2 + 350, stats_y + 60),
+    total_frames = max(1, len(score_history))
+    stats_y0 = 520
+    rounded_rect(canvas, (WINDOW_W // 2 - 440, stats_y0),
+                 (WINDOW_W // 2 + 440, stats_y0 + 125),
                  BG_PANEL_LIGHT, radius=14, thickness=-1)
-    put_centered_text(canvas, f"MAX COMBO  {max_combo}",
-                      stats_y + 5, 0.9, ACCENT_PINK, 2)
-    put_centered_text(canvas, f"FRAMES EVALUADOS  {len(score_history)}",
-                      stats_y + 40, 0.7, TEXT_DIM, 1)
+
+    # Linea 1: desglose de etiquetas con colores
+    if label_counts:
+        parts = []
+        for lbl in ("PERFECT", "GREAT", "GOOD", "OK", "MISS"):
+            n = label_counts.get(lbl, 0)
+            if n:
+                parts.append((lbl, f"{lbl} {100 * n // total_frames}%"))
+        sep = "   "
+        font, fs, th = cv2.FONT_HERSHEY_DUPLEX, 0.75, 2
+        widths = [cv2.getTextSize(t, font, fs, th)[0][0] for _, t in parts]
+        sep_w = cv2.getTextSize(sep, font, fs, th)[0][0]
+        x = WINDOW_W // 2 - (sum(widths) + sep_w * (len(parts) - 1)) // 2
+        for (lbl, t), w in zip(parts, widths):
+            cv2.putText(canvas, t, (x, stats_y0 + 35), font, fs,
+                        LABEL_COLORS.get(lbl, TEXT_PRIMARY), th, cv2.LINE_AA)
+            x += w + sep_w
+
+    # Linea 2: precision por articulacion (que parte del cuerpo fallo)
+    if joint_cnt is not None and joint_cnt.sum() > 0:
+        segs = []
+        for name, a, b in JOINT_GROUPS:
+            cnt = joint_cnt[a] + joint_cnt[b]
+            if cnt > 0:
+                pct = 100.0 * (joint_sum[a] + joint_sum[b]) / cnt
+                segs.append(f"{name} {pct:.0f}%")
+            else:
+                segs.append(f"{name} --")
+        put_centered_text(canvas, "   ".join(segs), stats_y0 + 75, 0.7,
+                          TEXT_PRIMARY, 1)
+
+    # Linea 3: combo y deteccion
+    det_pct = 100 * detected_frames // total_frames
+    put_centered_text(canvas,
+                      f"MAX COMBO {max_combo}   |   DETECTADA {det_pct}% DEL TIEMPO",
+                      stats_y0 + 110, 0.65, TEXT_DIM, 1)
 
     # Mini grafico de evolucion
     if score_history:
@@ -641,6 +680,12 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
     loop_i = 0
     player_poses = []   # ultima deteccion (se reusa entre inferencias)
 
+    # Estadisticas finales: por articulacion, por etiqueta y deteccion
+    joint_sum = np.zeros(8, dtype=np.float64)
+    joint_cnt = np.zeros(8, dtype=np.int64)
+    detected_frames = 0
+    label_counts = {}
+
     # Tolerancia temporal: el jugador reacciona con ~200-500 ms de retraso
     # respecto a lo que ve. Comparamos contra una ventana de frames de la
     # referencia (mas hacia atras que adelante) y nos quedamos con el mejor
@@ -708,8 +753,12 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
                                         ref_angles_all[lo:hi + 1],
                                         ref_valid_all[lo:hi + 1])
             if best is not None:
-                current_score = best
+                current_score, pj_scores, pj_valid = best
                 instant_label = score_to_label(current_score)
+                if not paused:
+                    joint_sum[pj_valid] += pj_scores[pj_valid]
+                    joint_cnt[pj_valid] += 1
+                    detected_frames += 1
 
         # TODOS los frames cuentan para el promedio (0 si no hay jugador
         # detectado o la comparacion no fue confiable): no bailar = 0 puntos.
@@ -717,6 +766,7 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
         if not paused:
             score_buffer.append(current_score)
             score_history.append(current_score)
+            label_counts[instant_label] = label_counts.get(instant_label, 0) + 1
 
         smoothed_score = float(np.mean(score_buffer)) if score_buffer else 0.0
         avg_score = float(np.mean(score_history)) if score_history else 0.0
@@ -812,7 +862,24 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
         print(f"  latencia p95      : {p95_ms:.1f} ms")
         print(f"  latencia maxima   : {max_ms:.1f} ms")
 
-    show_final_screen(final_score, score_history, max_combo)
+    # Resumen de precision por consola (para el informe)
+    if score_history:
+        total_frames = len(score_history)
+        print("--- Precision ---")
+        print("  etiquetas: " + "  ".join(
+            f"{lbl} {100 * label_counts.get(lbl, 0) // total_frames}%"
+            for lbl in ("PERFECT", "GREAT", "GOOD", "OK", "MISS")))
+        segs = []
+        for name, a, b in JOINT_GROUPS:
+            cnt = joint_cnt[a] + joint_cnt[b]
+            segs.append(f"{name.lower()} {100.0 * (joint_sum[a] + joint_sum[b]) / cnt:.0f}%"
+                        if cnt else f"{name.lower()} --")
+        print("  por articulacion: " + " | ".join(segs))
+        print(f"  detectada en camara: {100 * detected_frames // total_frames}% del tiempo")
+
+    show_final_screen(final_score, score_history, max_combo,
+                      label_counts=label_counts, joint_sum=joint_sum,
+                      joint_cnt=joint_cnt, detected_frames=detected_frames)
 
     cap_ref.release()
     cap_cam.release()
