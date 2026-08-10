@@ -17,8 +17,6 @@ La eleccion se hace con un flag --backend en los scripts. El codigo del juego
 es identico en los dos; solo cambia el detector.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import cv2
@@ -33,7 +31,7 @@ MODELS_DIR = PROJECT_ROOT / "models"
 class PoseDetector:
     """Interfaz comun a todos los detectores de pose."""
 
-    def detect(self, frame_bgr: np.ndarray, timestamp_ms: int = 0) -> list[np.ndarray]:
+    def detect(self, frame_bgr, timestamp_ms=0):
         """Detecta personas en un frame BGR (formato de OpenCV).
 
         Devuelve una lista de poses, cada una un array (13, 3) en formato
@@ -103,7 +101,7 @@ class MediaPipePoseDetector(PoseDetector):
         self._landmarker = mp_vision.PoseLandmarker.create_from_options(options)
         self._running_mode = running_mode
 
-    def detect(self, frame_bgr: np.ndarray, timestamp_ms: int = 0) -> list[np.ndarray]:
+    def detect(self, frame_bgr, timestamp_ms=0):
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
         if self._running_mode == "video":
@@ -154,13 +152,13 @@ class PoseNetPoseDetector(PoseDetector):
         self._net = poseNet(model, threshold=threshold)
         self._num_poses = num_poses
 
-    def detect(self, frame_bgr: np.ndarray, timestamp_ms: int = 0) -> list[np.ndarray]:
+    def detect(self, frame_bgr, timestamp_ms=0):
         h, w = frame_bgr.shape[:2]
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         cuda_img = self._cudaFromNumpy(rgb)
         poses = self._net.Process(cuda_img, overlay="none")
 
-        results: list[np.ndarray] = []
+        results = []
         for pose in poses:
             arr = np.zeros((NUM_KEYPOINTS, 3), dtype=np.float32)
             for i, name in enumerate(CANONICAL_NAMES):

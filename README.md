@@ -170,11 +170,14 @@ uv run python src/just_dance_nn/play.py "Video 1 - Happy.mp4" --reference "refer
 ```
 
 Controles:
-- **Espacio** → pausa / reanudar
+- **Espacio** → pausa / reanudar (también pausa el audio)
+- **F** → pantalla completa on/off
 - **Q** → salir antes de tiempo
 
 Flags útiles:
 - `--no-mirror` → desactiva el modo espejo (por defecto, el video y los landmarks de referencia se espejan para que el jugador imite "lado por lado" como en Just Dance real).
+- `--fullscreen` → arranca en pantalla completa.
+- `--no-audio` → sin sonido. (El audio usa `ffplay`, que viene con **ffmpeg**: `brew install ffmpeg` en Mac. Si no está instalado, el juego avisa y sigue mudo.)
 - `--countdown N` → segundos de cuenta regresiva (default 3).
 - `--cam-index N` → si tenés varias cámaras.
 
@@ -253,17 +256,17 @@ En el juego real de Just Dance, el video del bailarín se muestra **espejado** p
 - [x] Extracción de referencia con tracking de un solo bailarín
 - [x] Comparador por ángulos articulares con modo espejo
 - [x] Motor de juego con HUD, combo, estrellas y pantalla final
-- [ ] **Audio sincronizado** (reproducir el audio del MP4 con el video)
+- [x] **Audio sincronizado** (`ffplay` como subproceso, pausa con SIGSTOP/SIGCONT, fallback mudo si no hay ffmpeg)
 - [ ] **Esqueleto guía** dibujado sobre el bailarín de la referencia
-- [ ] **Selector de canciones** (pantalla inicial con thumbnails)
+- [x] **Selector de canciones** (menú que escanea `videos/`; videos nuevos aparecen solos)
 - [ ] **Tolerancia temporal**: comparar contra ±N frames y quedarse con el mejor match (más perdonador)
 - [ ] **Multi-jugador** con identificación persistente (tracking de identidad entre frames)
 
 ### Despliegue
 
-- [ ] Optimizar inferencia con TensorRT para Jetson Nano
-- [ ] Modo pantalla completa
-- [ ] Empaquetar como ejecutable / script de arranque para la Jetson
+- [x] Optimizar inferencia para Jetson Nano (backend `posenet`: jetson-inference + TensorRT en GPU)
+- [x] Modo pantalla completa (`--fullscreen` / tecla F)
+- [x] Empaquetar como script de arranque para la Jetson (`arrancar_juego.sh`)
 
 ### Académico
 

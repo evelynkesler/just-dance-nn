@@ -20,8 +20,6 @@ Uso:
     uv run python src/just_dance_nn/extract_reference.py <video> [--start S] [--end E] [--preview]
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 import time
@@ -62,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def pose_centroid(pose: np.ndarray) -> tuple[float, float]:
+def pose_centroid(pose):
     """Centroide del bailarin = promedio de caderas (puntos estables)."""
     return (
         float((pose[L_HIP, 0] + pose[R_HIP, 0]) / 2),
@@ -80,11 +78,11 @@ def draw_basic_skeleton(img: np.ndarray, pose: np.ndarray, color, thickness: int
             cv2.line(img, pa, pb, color, thickness)
 
 
-def select_target_interactive(frame: np.ndarray, poses: list[np.ndarray]) -> int:
+def select_target_interactive(frame, poses):
     """Muestra el frame con cada pose numerada y devuelve el indice elegido por click."""
     h, w = frame.shape[:2]
     overlay = frame.copy()
-    centroids: list[tuple[int, int]] = []
+    centroids = []
     colors = [(0, 255, 0), (0, 165, 255), (255, 0, 255), (255, 255, 0)]
     for i, pose in enumerate(poses):
         color = colors[i % len(colors)]
@@ -101,7 +99,7 @@ def select_target_interactive(frame: np.ndarray, poses: list[np.ndarray]) -> int
     cv2.putText(overlay, "ESC para usar el de mas al centro",
                 (15, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-    selected: dict[str, int] = {}
+    selected = {}
 
     def on_mouse(event, x, y, _flags, _param) -> None:
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -144,8 +142,8 @@ def find_first_frame_with_poses(cap, detector, fps, start_frame, end_frame, max_
     return None
 
 
-def extract(video_path: Path, output_path: Path, preview: bool, backend: str,
-            complexity: str, start_s: float, end_s: float | None, auto_center: bool) -> None:
+def extract(video_path, output_path, preview, backend,
+            complexity, start_s, end_s, auto_center):
     if not video_path.exists():
         raise SystemExit(f"Error: el video no existe: {video_path}")
 
@@ -189,6 +187,13 @@ def extract(video_path: Path, output_path: Path, preview: bool, backend: str,
 
     last_centroid = pose_centroid(init_poses[target_idx])
 
+    # MediaPipe en modo video exige timestamps monotonicamente crecientes, y la
+    # busqueda del frame inicial ya consumio timestamps. Reiniciamos el detector
+    # para poder reprocesar desde el principio del rango.
+    detector.close()
+    detector = create_detector(backend, num_poses=NUM_POSES_DETECT,
+                               model_complexity=complexity)
+
     # Reset y procesar todo el rango (incluyendo los frames previos al init_offset)
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
@@ -199,7 +204,7 @@ def extract(video_path: Path, output_path: Path, preview: bool, backend: str,
     t_start = time.time()
 
     # Recordamos las primeras detecciones que ya hicimos para no repetir
-    cached_first: list[list[np.ndarray] | None] = [None] * (init_offset + 1)
+    cached_first = [None] * (init_offset + 1)
     cached_first[init_offset] = init_poses
 
     while frame_idx < frame_count:
@@ -213,7 +218,7 @@ def extract(video_path: Path, output_path: Path, preview: bool, backend: str,
             ts_ms = int(((start_frame + frame_idx) / fps) * 1000)
             poses = detector.detect(frame, ts_ms)
 
-        chosen: np.ndarray | None = None
+        chosen = None
         if poses:
             centroids = [pose_centroid(p) for p in poses]
             dists = [((c[0] - last_centroid[0]) ** 2 + (c[1] - last_centroid[1]) ** 2) ** 0.5 for c in centroids]

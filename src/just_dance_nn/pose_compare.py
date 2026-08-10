@@ -21,16 +21,13 @@ normalizados a [0, 1] y visibility en [0, 1].
     11      left_ankle      12   right_ankle
 """
 
-from __future__ import annotations
-
-from dataclasses import dataclass
 import numpy as np
 
 # ---------------------------------------------------------------------------
 # Formato canonico de keypoints (compartido por todos los backends)
 # ---------------------------------------------------------------------------
 
-CANONICAL_NAMES: list[str] = [
+CANONICAL_NAMES = [
     "nose",            # 0
     "left_shoulder",   # 1
     "right_shoulder",  # 2
@@ -60,7 +57,7 @@ L_ANKLE, R_ANKLE = 11, 12
 
 # Articulaciones a evaluar: (nombre, punto_a, vertice, punto_b)
 # El angulo es el formado en `vertice` por los segmentos vertice->a y vertice->b
-JOINT_ANGLES: list[tuple[str, int, int, int]] = [
+JOINT_ANGLES = [
     ("codo_izq",    L_SHOULDER, L_ELBOW, L_WRIST),   # hombro - codo - muneca (izq)
     ("codo_der",    R_SHOULDER, R_ELBOW, R_WRIST),   # hombro - codo - muneca (der)
     ("hombro_izq",  L_ELBOW, L_SHOULDER, L_HIP),     # codo - hombro - cadera (izq)
@@ -74,7 +71,7 @@ JOINT_ANGLES: list[tuple[str, int, int, int]] = [
 NUM_ANGLES = len(JOINT_ANGLES)
 
 # Pares izquierda/derecha para swappear al espejar (la nariz se mantiene).
-LEFT_RIGHT_PAIRS: list[tuple[int, int]] = [
+LEFT_RIGHT_PAIRS = [
     (L_SHOULDER, R_SHOULDER),
     (L_ELBOW, R_ELBOW),
     (L_WRIST, R_WRIST),
@@ -84,7 +81,7 @@ LEFT_RIGHT_PAIRS: list[tuple[int, int]] = [
 ]
 
 # Conexiones para dibujar el esqueleto (en indices canonicos).
-POSE_CONNECTIONS: list[tuple[int, int]] = [
+POSE_CONNECTIONS = [
     (L_SHOULDER, R_SHOULDER),
     (L_SHOULDER, L_ELBOW), (L_ELBOW, L_WRIST),
     (R_SHOULDER, R_ELBOW), (R_ELBOW, R_WRIST),
@@ -95,12 +92,17 @@ POSE_CONNECTIONS: list[tuple[int, int]] = [
 ]
 
 
-@dataclass
 class FrameScore:
-    """Resultado de comparar un frame de jugador contra uno de referencia."""
-    score: float                 # 0 a 100
-    angle_errors: np.ndarray     # error absoluto por articulacion (grados)
-    valid: bool                  # True si la comparacion fue confiable
+    """Resultado de comparar un frame de jugador contra uno de referencia.
+
+    (Clase simple en vez de @dataclass para ser compatible con Python 3.6,
+    que es el que corre en la Jetson; dataclasses recien existe desde 3.7.)
+    """
+
+    def __init__(self, score, angle_errors, valid):
+        self.score = score              # 0 a 100
+        self.angle_errors = angle_errors  # error absoluto por articulacion (grados)
+        self.valid = valid              # True si la comparacion fue confiable
 
 
 def mirror_pose(pose_array: np.ndarray) -> np.ndarray:

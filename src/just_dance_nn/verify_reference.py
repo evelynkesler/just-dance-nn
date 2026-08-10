@@ -12,8 +12,6 @@ Controles:
     flechas izq/der - frame anterior / siguiente (cuando esta pausado)
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 
@@ -33,7 +31,7 @@ def parse_args() -> argparse.Namespace:
 
 def draw_pose(img: np.ndarray, pose: np.ndarray) -> None:
     h, w = img.shape[:2]
-    points: list[tuple[int, int] | None] = []
+    points = []
     for i in range(NUM_KEYPOINTS):
         if pose[i, VIS_IDX] > 0.3:
             points.append((int(pose[i, 0] * w), int(pose[i, 1] * h)))

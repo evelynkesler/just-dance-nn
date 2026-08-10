@@ -29,3 +29,6 @@ references/*.npz
 *.swp
 .DS_Store
 Thumbs.db
+
+# Documentos de la catedra
+*.pdf

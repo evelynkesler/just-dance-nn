@@ -40,7 +40,7 @@ def draw_pose(frame: np.ndarray, pose: np.ndarray, player_idx: int = 0) -> None:
     h, w, _ = frame.shape
     line_color, point_color = PLAYER_COLORS[player_idx % len(PLAYER_COLORS)]
 
-    pts: list[tuple[int, int] | None] = []
+    pts = []
     for i in range(len(pose)):
         if pose[i, VIS_IDX] > 0.3:
             pts.append((int(pose[i, 0] * w), int(pose[i, 1] * h)))
@@ -107,7 +107,7 @@ def main() -> None:
         ts_ms = int(time.time() * 1000)
         poses = detector.detect(frame, ts_ms)
 
-        info_lines: list[str] = []
+        info_lines = []
         if poses:
             info_lines.append(f"Personas detectadas: {len(poses)}")
             for idx, pose in enumerate(poses):

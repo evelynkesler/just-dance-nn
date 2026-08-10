@@ -9,13 +9,15 @@ Uso:
 Controles:
     q - salir antes de tiempo
     espacio - pausar / reanudar
+    f - pantalla completa on/off
 """
-
-from __future__ import annotations
 
 import argparse
 from collections import deque
 from pathlib import Path
+import shutil
+import signal
+import subprocess
 import sys
 import time
 
@@ -60,13 +62,27 @@ LABEL_COLORS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Motor Just Dance NN")
-    parser.add_argument("video", type=Path)
-    parser.add_argument("--reference", type=Path, required=True)
+    parser.add_argument("video", type=Path, nargs="?", default=None,
+                        help="Video a bailar. Si se OMITE, abre el menu de seleccion "
+                             "de canciones (escanea la carpeta de videos).")
+    parser.add_argument("--reference", type=Path, default=None,
+                        help="Referencia .npz. Si se omite, se busca <references-dir>/<video>.npz")
+    parser.add_argument("--videos-dir", type=Path, default=PROJECT_ROOT / "videos",
+                        help="Carpeta donde estan los videos (para el menu)")
+    parser.add_argument("--references-dir", type=Path, default=PROJECT_ROOT / "references",
+                        help="Carpeta donde se guardan/buscan las referencias .npz")
     parser.add_argument("--start", type=float, default=0.0)
     parser.add_argument("--end", type=float, default=None)
     parser.add_argument("--cam-index", type=int, default=0)
     parser.add_argument("--countdown", type=int, default=3)
     parser.add_argument("--no-mirror", action="store_true")
+    parser.add_argument("--no-audio", action="store_true",
+                        help="No reproducir el audio del video")
+    parser.add_argument("--fullscreen", action="store_true",
+                        help="Arrancar en pantalla completa (tecla F para alternar)")
+    parser.add_argument("--infer-every", type=int, default=1,
+                        help="Correr la red cada N frames y reusar la pose entre medio "
+                             "(N=2 recomendado en la Jetson: mas fluidez, misma jugabilidad)")
     parser.add_argument("--backend", choices=["mediapipe", "posenet"], default="mediapipe",
                         help="Detector de pose: mediapipe (CPU, Mac/PC) o posenet (GPU, Jetson)")
     parser.add_argument("--model-complexity", choices=["lite", "full", "heavy"], default="lite",
@@ -74,7 +90,81 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# -------------------------- audio --------------------------
+
+class AudioPlayer:
+    """Reproduce el audio del video de referencia con ffplay como subproceso.
+
+    La sincronizacion es por reloj compartido: el proceso arranca junto con el
+    juego, en el segundo `start_s` del video. La pausa congela el proceso con
+    SIGSTOP y lo reanuda con SIGCONT; como el juego congela su reloj de la
+    misma manera, los dos quedan alineados al reanudar.
+
+    Si ffplay no esta instalado (p. ej. en el contenedor de la Jetson sin
+    ffmpeg), el juego sigue funcionando sin sonido.
+    """
+
+    def __init__(self, video_path, start_s=0.0, enabled=True):
+        self._proc = None
+        self._paused = False
+        self._exe = shutil.which("ffplay") if enabled else None
+        if enabled and self._exe is None:
+            print("(sin audio: no se encontro 'ffplay'. Instalar ffmpeg para tener sonido)")
+        self._args = [
+            self._exe or "", "-nodisp", "-autoexit", "-loglevel", "quiet",
+            "-vn", "-ss", str(start_s), "-i", str(video_path),
+        ]
+
+    def start(self):
+        if self._exe is None:
+            return
+        try:
+            self._proc = subprocess.Popen(
+                self._args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            print(f"(sin audio: no se pudo lanzar ffplay: {exc})")
+            self._proc = None
+
+    def _signal(self, sig):
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                self._proc.send_signal(sig)
+            except OSError:
+                pass
+
+    def pause(self):
+        if not self._paused and hasattr(signal, "SIGSTOP"):
+            self._signal(signal.SIGSTOP)
+            self._paused = True
+
+    def resume(self):
+        if self._paused and hasattr(signal, "SIGCONT"):
+            self._signal(signal.SIGCONT)
+            self._paused = False
+
+    def stop(self):
+        if self._proc is not None:
+            if self._paused:
+                self.resume()  # un proceso frenado no atiende SIGTERM
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=2)
+            except Exception:
+                try:
+                    self._proc.kill()
+                except OSError:
+                    pass
+            self._proc = None
+
+
 # -------------------------- helpers de dibujo --------------------------
+
+def set_fullscreen(window, on):
+    cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN,
+                          cv2.WINDOW_FULLSCREEN if on else cv2.WINDOW_NORMAL)
+    if not on:
+        cv2.resizeWindow(window, WINDOW_W, WINDOW_H)
+
 
 def fit_to_panel(img: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
     h, w = img.shape[:2]
@@ -88,8 +178,7 @@ def fit_to_panel(img: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
     return canvas
 
 
-def rounded_rect(img: np.ndarray, p1: tuple[int, int], p2: tuple[int, int],
-                 color, radius: int = 12, thickness: int = -1) -> None:
+def rounded_rect(img, p1, p2, color, radius=12, thickness=-1):
     """Rectangulo con esquinas redondeadas."""
     x1, y1 = p1
     x2, y2 = p2
@@ -111,21 +200,31 @@ def rounded_rect(img: np.ndarray, p1: tuple[int, int], p2: tuple[int, int],
         cv2.ellipse(img, (x2 - radius, y2 - radius), (radius, radius), 0, 0, 90, color, thickness)
 
 
-def vertical_gradient(h: int, w: int, top: tuple[int, int, int], bottom: tuple[int, int, int]) -> np.ndarray:
-    """Crea un fondo con gradiente vertical."""
-    img = np.zeros((h, w, 3), dtype=np.uint8)
-    for y in range(h):
-        t = y / max(1, h - 1)
-        b = int(top[0] * (1 - t) + bottom[0] * t)
-        g = int(top[1] * (1 - t) + bottom[1] * t)
-        r = int(top[2] * (1 - t) + bottom[2] * t)
-        img[y, :] = (b, g, r)
-    return img
+# Cache de gradientes ya calculados. El gradiente se arma con un loop de Python
+# (lento en la Jetson); si lo recalculamos en cada frame mata el rendimiento.
+# Lo calculamos UNA vez por tamano/color y despues solo devolvemos una copia
+# (copiar un array es una operacion rapida en C).
+_grad_cache = {}
 
 
-def put_centered_text(img: np.ndarray, text: str, y: int, font_scale: float,
-                      color, thickness: int, x_center: int | None = None,
-                      shadow: bool = True) -> None:
+def vertical_gradient(h, w, top, bottom):
+    """Crea un fondo con gradiente vertical (cacheado por tamano y colores)."""
+    key = (h, w, tuple(top), tuple(bottom))
+    base = _grad_cache.get(key)
+    if base is None:
+        base = np.zeros((h, w, 3), dtype=np.uint8)
+        for y in range(h):
+            t = y / max(1, h - 1)
+            b = int(top[0] * (1 - t) + bottom[0] * t)
+            g = int(top[1] * (1 - t) + bottom[1] * t)
+            r = int(top[2] * (1 - t) + bottom[2] * t)
+            base[y, :] = (b, g, r)
+        _grad_cache[key] = base
+    return base.copy()
+
+
+def put_centered_text(img, text, y, font_scale, color, thickness,
+                      x_center=None, shadow=True):
     size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
     cx = x_center if x_center is not None else img.shape[1] // 2
     x = cx - size[0] // 2
@@ -139,7 +238,7 @@ def put_centered_text(img: np.ndarray, text: str, y: int, font_scale: float,
 def draw_skeleton_glow(img: np.ndarray, landmarks: np.ndarray, base_color, glow_color) -> None:
     """Esqueleto con efecto glow: capa exterior gruesa difusa + interior fina nitida."""
     h, w = img.shape[:2]
-    pts: list[tuple[int, int] | None] = []
+    pts = []
     for i in range(NUM_KEYPOINTS):
         if landmarks[i, VIS_IDX] > 0.3:
             pts.append((int(landmarks[i, 0] * w), int(landmarks[i, 1] * h)))
@@ -175,7 +274,8 @@ def panel_label(canvas: np.ndarray, text: str, x: int, y: int, color) -> None:
 
 def draw_hud(canvas: np.ndarray, smoothed_score: float, avg_score: float,
              label: str, label_age: float, combo: int, max_combo: int,
-             progress: float, elapsed: float, total_duration: float, fps: float) -> None:
+             progress: float, elapsed: float, total_duration: float, fps: float,
+             inf_fps: float = 0.0) -> None:
     """HUD inferior con cajas redondeadas, gradiente y label animado."""
     hud_y0 = PANEL_H
 
@@ -276,8 +376,9 @@ def draw_hud(canvas: np.ndarray, smoothed_score: float, avg_score: float,
                 f"{int(elapsed):02d}:{int(elapsed * 100) % 100:02d} / "
                 f"{int(total_duration):02d}:{int(total_duration * 100) % 100:02d}",
                 (bar_x0, bar_y - 8), cv2.FONT_HERSHEY_DUPLEX, 0.5, TEXT_DIM, 1, cv2.LINE_AA)
-    cv2.putText(canvas, f"MAX COMBO {max_combo}   |   {fps:.0f} FPS",
-                (WINDOW_W - 280, bar_y - 8), cv2.FONT_HERSHEY_DUPLEX, 0.5, TEXT_DIM, 1, cv2.LINE_AA)
+    # render = FPS del loop completo; inf = FPS de la red neuronal sola (mide la GPU)
+    cv2.putText(canvas, f"MAX COMBO {max_combo}   |   {fps:.0f} FPS   |   red {inf_fps:.0f} FPS",
+                (WINDOW_W - 420, bar_y - 8), cv2.FONT_HERSHEY_DUPLEX, 0.5, TEXT_DIM, 1, cv2.LINE_AA)
 
 
 def show_countdown(cap_webcam: cv2.VideoCapture, seconds: int) -> None:
@@ -340,8 +441,7 @@ def stars_for_score(score: float) -> int:
     return 0
 
 
-def draw_star(img: np.ndarray, center: tuple[int, int], radius: int,
-              filled: bool, color_filled, color_empty) -> None:
+def draw_star(img, center, radius, filled, color_filled, color_empty):
     cx, cy = center
     pts = []
     for i in range(10):
@@ -357,7 +457,7 @@ def draw_star(img: np.ndarray, center: tuple[int, int], radius: int,
         cv2.polylines(img, [arr], True, color_empty, 2, cv2.LINE_AA)
 
 
-def show_final_screen(total_score: float, score_history: list[float], max_combo: int) -> None:
+def show_final_screen(total_score, score_history, max_combo):
     canvas = vertical_gradient(WINDOW_H, WINDOW_W, BG_PANEL, BG_DARK)
 
     put_centered_text(canvas, "RESULTADO FINAL", 90, 1.6, TEXT_PRIMARY, 3)
@@ -425,55 +525,71 @@ def show_final_screen(total_score: float, score_history: list[float], max_combo:
     cv2.waitKey(0)
 
 
-def main() -> None:
-    args = parse_args()
-    if not args.video.exists():
-        raise SystemExit(f"No existe el video: {args.video}")
-    if not args.reference.exists():
-        raise SystemExit(f"No existe la referencia: {args.reference}")
+def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
+             mirror=True, backend="mediapipe", model_complexity="lite",
+             audio=True, fullscreen=False, infer_every=1):
+    """Corre una partida completa con un video y su referencia ya extraida.
 
-    data = np.load(args.reference, allow_pickle=True)
+    Es el motor del juego, reutilizable: lo llama tanto el modo CLI directo
+    (play.py VIDEO ...) como el menu de seleccion de canciones.
+    """
+    video = Path(video)
+    reference = Path(reference)
+    if not video.exists():
+        raise SystemExit(f"No existe el video: {video}")
+    if not reference.exists():
+        raise SystemExit(f"No existe la referencia: {reference}")
+
+    data = np.load(reference, allow_pickle=True)
     ref_landmarks = data["landmarks"]
     ref_fps = float(data["fps"])
     ref_frame_count = int(data["frame_count"])
     print(f"Referencia: {ref_frame_count} frames @ {ref_fps:.2f} fps")
 
-    mirror_mode = not args.no_mirror
+    mirror_mode = mirror
     if mirror_mode:
         print("Modo espejo activado.")
         ref_landmarks = np.stack([mirror_pose(p) for p in ref_landmarks])
 
-    cap_ref = cv2.VideoCapture(str(args.video))
+    cap_ref = cv2.VideoCapture(str(video))
     if not cap_ref.isOpened():
         raise SystemExit("No se pudo abrir el video de referencia")
     video_fps = cap_ref.get(cv2.CAP_PROP_FPS) or ref_fps
-    start_frame_video = int(args.start * video_fps)
+    start_frame_video = int(start * video_fps)
     if start_frame_video > 0:
         cap_ref.set(cv2.CAP_PROP_POS_FRAMES, start_frame_video)
     total_duration = ref_frame_count / ref_fps
 
     cap_cam = (
-        cv2.VideoCapture(args.cam_index, cv2.CAP_DSHOW)
+        cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
         if sys.platform == "win32"
-        else cv2.VideoCapture(args.cam_index)
+        else cv2.VideoCapture(cam_index)
     )
     if not cap_cam.isOpened():
         raise SystemExit("No se pudo abrir la webcam")
-    cap_cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap_cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    # 640x480: suficiente para detectar la pose y MUCHO mas liviano que 720p
+    # en la Jetson (acelera tanto la captura como la inferencia de la red).
+    cap_cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap_cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-    detector = create_detector(args.backend, num_poses=1,
-                               model_complexity=args.model_complexity)
-    print(f"Detector de pose: {args.backend}")
+    detector = create_detector(backend, num_poses=1,
+                               model_complexity=model_complexity)
+    print(f"Detector de pose: {backend}")
 
     cv2.namedWindow("Just Dance NN", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Just Dance NN", WINDOW_W, WINDOW_H)
+    if fullscreen:
+        set_fullscreen("Just Dance NN", True)
 
-    if args.countdown > 0:
-        show_countdown(cap_cam, args.countdown)
+    if countdown > 0:
+        show_countdown(cap_cam, countdown)
 
-    score_history: list[float] = []
-    score_buffer: deque[float] = deque(maxlen=10)
+    # El audio arranca junto con el reloj del juego (mismo instante que t_start)
+    audio_player = AudioPlayer(video, start_s=start, enabled=audio)
+    audio_player.start()
+
+    score_history = []
+    score_buffer = deque(maxlen=10)
     paused = False
     paused_offset = 0.0
     pause_start = 0.0
@@ -482,10 +598,20 @@ def main() -> None:
     fps_count = 0
     fps_display = 0.0
 
+    # Medicion de la inferencia de la red por separado (la metrica que importa
+    # para el TP: cuanto rinde el detector en la GPU de la Jetson).
+    inf_ms_buffer = deque(maxlen=30)  # ventana para el HUD
+    inf_ms_all = []                   # historico para el resumen final
+    inf_fps_display = 0.0
+
     combo = 0
     max_combo = 0
     last_label = ""
     label_t0 = time.time()
+
+    infer_every = max(1, int(infer_every))
+    loop_i = 0
+    player_poses = []   # ultima deteccion (se reusa entre inferencias)
 
     t_start = time.time()
     print("Empieza el baile! Presiona 'q' para salir, espacio para pausar.")
@@ -504,8 +630,17 @@ def main() -> None:
 
         target_video_frame = start_frame_video + ref_idx
         current_video_frame = int(cap_ref.get(cv2.CAP_PROP_POS_FRAMES))
-        if target_video_frame > current_video_frame + 1:
-            cap_ref.set(cv2.CAP_PROP_POS_FRAMES, target_video_frame)
+        skip = target_video_frame - current_video_frame
+        if skip > 1:
+            # Si esta MUY atrasado, un seek real (caro pero corta camino).
+            # Si esta poco atrasado, avanzar con grab() es mucho mas barato que
+            # un seek aleatorio (que reabre desde el keyframe en cada frame: ESA
+            # era la causa principal del tironeo del video en la Jetson).
+            if skip > 30:
+                cap_ref.set(cv2.CAP_PROP_POS_FRAMES, target_video_frame)
+            else:
+                for _ in range(skip - 1):
+                    cap_ref.grab()
         ok_ref, ref_frame = cap_ref.read()
         if not ok_ref:
             break
@@ -515,8 +650,17 @@ def main() -> None:
             break
         cam_frame = cv2.flip(cam_frame, 1)
 
-        ts_ms = int(elapsed * 1000)
-        player_poses = detector.detect(cam_frame, ts_ms)
+        # Con --infer-every N la red corre 1 de cada N frames y entre medio se
+        # reusa la ultima pose (la pose humana casi no cambia en ~30-60 ms).
+        # En la Jetson N=2 duplica la fluidez del loop sin afectar el juego.
+        if loop_i % infer_every == 0:
+            ts_ms = int(elapsed * 1000)
+            t_inf0 = time.perf_counter()
+            player_poses = detector.detect(cam_frame, ts_ms)
+            inf_ms = (time.perf_counter() - t_inf0) * 1000.0
+            inf_ms_buffer.append(inf_ms)
+            inf_ms_all.append(inf_ms)
+        loop_i += 1
 
         current_score = 0.0
         instant_label = "MISS"
@@ -573,12 +717,16 @@ def main() -> None:
         fps_count += 1
         if time.time() - fps_t0 >= 1.0:
             fps_display = fps_count / (time.time() - fps_t0)
+            if inf_ms_buffer:
+                mean_inf_ms = sum(inf_ms_buffer) / len(inf_ms_buffer)
+                inf_fps_display = 1000.0 / mean_inf_ms if mean_inf_ms > 0 else 0.0
             fps_count = 0
             fps_t0 = time.time()
 
         progress = elapsed / total_duration if total_duration > 0 else 0.0
         draw_hud(canvas, smoothed_score, avg_score, last_label, label_age,
-                 combo, max_combo, progress, elapsed, total_duration, fps_display)
+                 combo, max_combo, progress, elapsed, total_duration, fps_display,
+                 inf_fps_display)
 
         if paused:
             overlay = canvas.copy()
@@ -596,17 +744,228 @@ def main() -> None:
             if paused:
                 paused_offset += time.time() - pause_start
                 paused = False
+                audio_player.resume()
             else:
                 pause_start = time.time()
                 paused = True
+                audio_player.pause()
+        elif key in (ord("f"), ord("F")):
+            fullscreen = not fullscreen
+            set_fullscreen("Just Dance NN", fullscreen)
 
     final_score = float(np.mean(score_history)) if score_history else 0.0
     print(f"Score final: {final_score:.2f}  ({score_to_label(final_score)})  combo max: {max_combo}")
+
+    # ---- Resumen de rendimiento de la red (para el informe del TP) ----
+    if inf_ms_all:
+        inf = np.array(inf_ms_all)
+        mean_ms = float(inf.mean())
+        p95_ms = float(np.percentile(inf, 95))
+        max_ms = float(inf.max())
+        print("")
+        print(f"--- Rendimiento de inferencia ({backend}) ---")
+        print(f"  frames procesados : {len(inf)}")
+        print(f"  latencia media    : {mean_ms:.1f} ms  ->  {1000.0 / mean_ms:.1f} FPS")
+        print(f"  latencia p95      : {p95_ms:.1f} ms")
+        print(f"  latencia maxima   : {max_ms:.1f} ms")
+
     show_final_screen(final_score, score_history, max_combo)
 
     cap_ref.release()
     cap_cam.release()
     detector.close()
+    cv2.destroyAllWindows()
+
+
+# ===========================================================================
+# Menu de seleccion de canciones
+# ===========================================================================
+
+VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"}
+
+# Teclas de navegacion (varios codigos segun SO/build de OpenCV + WASD/JK)
+_UP_KEYS = {ord("w"), ord("W"), ord("k"), 82, 65362, 2490368, 63232}
+_DOWN_KEYS = {ord("s"), ord("S"), ord("j"), 84, 65364, 2621440, 63233}
+_ENTER_KEYS = {13, 10, ord(" ")}
+_QUIT_KEYS = {ord("q"), ord("Q"), 27}
+
+
+class Song:
+    """Una cancion disponible: su video y (si existe) su referencia .npz.
+
+    (Clase simple en vez de @dataclass para correr en Python 3.6 en la Jetson.)
+    """
+
+    def __init__(self, title, video, reference, has_reference):
+        self.title = title
+        self.video = video
+        self.reference = reference
+        self.has_reference = has_reference
+
+
+def discover_songs(videos_dir, references_dir):
+    """Escanea la carpeta de videos y arma la lista de canciones.
+
+    Se llama en cada vuelta del menu, asi que cualquier video nuevo que se
+    agregue a la carpeta aparece automaticamente como opcion. Para cada video
+    busca su referencia en <references_dir>/<nombre_del_video>.npz.
+    """
+    videos_dir = Path(videos_dir)
+    references_dir = Path(references_dir)
+    songs = []
+    if not videos_dir.exists():
+        return songs
+    for v in sorted(videos_dir.iterdir(), key=lambda p: p.name.lower()):
+        if v.name.startswith(".") or not v.is_file():
+            continue
+        if v.suffix.lower() not in VIDEO_EXTS:
+            continue
+        ref = references_dir / f"{v.stem}.npz"
+        songs.append(Song(title=v.stem, video=v, reference=ref,
+                          has_reference=ref.exists()))
+    return songs
+
+
+def select_song_screen(songs, fullscreen=False):
+    """Pantalla de seleccion. Devuelve la cancion elegida o None si se sale."""
+    win = "Just Dance NN"
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(win, WINDOW_W, WINDOW_H)
+    if fullscreen:
+        set_fullscreen(win, True)
+
+    selected = 0
+    view_start = 0
+    max_visible = 7
+    list_w = 960
+    x0 = (WINDOW_W - list_w) // 2
+    row_h = 72
+    gap = 14
+    top = 250
+
+    while True:
+        canvas = vertical_gradient(WINDOW_H, WINDOW_W, BG_PANEL, BG_DARK)
+        put_centered_text(canvas, "JUST DANCE NN", 110, 2.0, ACCENT_CYAN, 4)
+        put_centered_text(canvas, "Elegi una cancion", 175, 1.0, TEXT_PRIMARY, 2)
+
+        if not songs:
+            put_centered_text(canvas, "No hay videos en la carpeta 'videos/'",
+                              WINDOW_H // 2 - 20, 1.0, TEXT_PRIMARY, 2)
+            put_centered_text(canvas, "Agrega archivos .mp4 a esa carpeta y volve a entrar",
+                              WINDOW_H // 2 + 30, 0.7, TEXT_DIM, 1)
+            put_centered_text(canvas, "Q para salir", WINDOW_H - 40, 0.7, TEXT_DIM, 1)
+            cv2.imshow(win, canvas)
+            if cv2.waitKeyEx(30) in _QUIT_KEYS:
+                return None
+            continue
+
+        # Mantener la seleccion dentro de la ventana visible (scroll)
+        if selected < view_start:
+            view_start = selected
+        elif selected >= view_start + max_visible:
+            view_start = selected - max_visible + 1
+
+        visible = songs[view_start:view_start + max_visible]
+        for i, song in enumerate(visible):
+            real_idx = view_start + i
+            y = top + i * (row_h + gap)
+            is_sel = real_idx == selected
+            bg = BG_PANEL_LIGHT if is_sel else BG_PANEL
+            rounded_rect(canvas, (x0, y), (x0 + list_w, y + row_h), bg, radius=14, thickness=-1)
+            border = ACCENT_PINK if is_sel else (60, 50, 75)
+            rounded_rect(canvas, (x0, y), (x0 + list_w, y + row_h), border,
+                         radius=14, thickness=2 if is_sel else 1)
+
+            cv2.putText(canvas, f"{real_idx + 1}", (x0 + 24, y + 46),
+                        cv2.FONT_HERSHEY_DUPLEX, 1.0,
+                        ACCENT_CYAN if is_sel else TEXT_DIM, 2, cv2.LINE_AA)
+
+            title = song.title if len(song.title) <= 46 else song.title[:43] + "..."
+            cv2.putText(canvas, title, (x0 + 78, y + 45),
+                        cv2.FONT_HERSHEY_DUPLEX, 0.75,
+                        TEXT_PRIMARY if is_sel else TEXT_DIM, 1, cv2.LINE_AA)
+
+            if song.has_reference:
+                status, scol = "LISTO", (120, 255, 120)
+            else:
+                status, scol = "FALTA REF.", (120, 140, 255)
+            ssize, _ = cv2.getTextSize(status, cv2.FONT_HERSHEY_DUPLEX, 0.6, 2)
+            cv2.putText(canvas, status, (x0 + list_w - ssize[0] - 24, y + 44),
+                        cv2.FONT_HERSHEY_DUPLEX, 0.6, scol, 2, cv2.LINE_AA)
+
+        # Nota si la cancion elegida todavia no tiene referencia
+        if not songs[selected].has_reference:
+            put_centered_text(canvas,
+                              "Esta cancion va a extraer su referencia la 1ra vez (puede tardar)",
+                              WINDOW_H - 70, 0.6, ACCENT_CYAN, 1)
+        put_centered_text(canvas,
+                          "W/S o flechas: mover    |    ENTER: elegir    |    Q: salir",
+                          WINDOW_H - 35, 0.7, TEXT_DIM, 1)
+
+        cv2.imshow(win, canvas)
+        key = cv2.waitKeyEx(30)
+        if key == -1:
+            continue
+        if key in _QUIT_KEYS:
+            return None
+        if key in (ord("f"), ord("F")):
+            fullscreen = not fullscreen
+            set_fullscreen(win, fullscreen)
+            continue
+        if key in _ENTER_KEYS:
+            return songs[selected]
+        if key in _UP_KEYS:
+            selected = (selected - 1) % len(songs)
+        elif key in _DOWN_KEYS:
+            selected = (selected + 1) % len(songs)
+        elif ord("1") <= key <= ord("9"):
+            idx = key - ord("1")
+            if idx < len(songs):
+                selected = idx
+
+
+def main() -> None:
+    args = parse_args()
+
+    # --- Modo directo: se paso un video por linea de comandos ---
+    if args.video is not None:
+        reference = args.reference or (args.references_dir / f"{args.video.stem}.npz")
+        run_game(args.video, reference, start=args.start, end=args.end,
+                 cam_index=args.cam_index, countdown=args.countdown,
+                 mirror=not args.no_mirror, backend=args.backend,
+                 model_complexity=args.model_complexity,
+                 audio=not args.no_audio, fullscreen=args.fullscreen,
+                 infer_every=args.infer_every)
+        return
+
+    # --- Modo menu: escanea la carpeta de videos en cada vuelta ---
+    print(f"Menu de canciones. Carpeta de videos: {args.videos_dir}")
+    while True:
+        songs = discover_songs(args.videos_dir, args.references_dir)
+        choice = select_song_screen(songs, fullscreen=args.fullscreen)
+        if choice is None:
+            print("Saliendo del menu.")
+            break
+
+        # Si la cancion no tiene referencia, se extrae sola (modo auto, sin clicks)
+        if not choice.has_reference:
+            print(f"'{choice.title}': extrayendo referencia por primera vez...")
+            try:
+                from just_dance_nn.extract_reference import extract
+                extract(choice.video, choice.reference, preview=False,
+                        backend=args.backend, complexity=args.model_complexity,
+                        start_s=args.start, end_s=args.end, auto_center=True)
+            except SystemExit as exc:
+                print(f"No se pudo extraer la referencia: {exc}")
+                continue
+
+        run_game(choice.video, choice.reference, start=args.start, end=args.end,
+                 cam_index=args.cam_index, countdown=args.countdown,
+                 mirror=not args.no_mirror, backend=args.backend,
+                 model_complexity=args.model_complexity,
+                 audio=not args.no_audio, fullscreen=args.fullscreen,
+                 infer_every=args.infer_every)
+
     cv2.destroyAllWindows()
 
 
