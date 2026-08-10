@@ -83,6 +83,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--infer-every", type=int, default=1,
                         help="Correr la red cada N frames y reusar la pose entre medio "
                              "(N=2 recomendado en la Jetson: mas fluidez, misma jugabilidad)")
+    parser.add_argument("--tolerance", type=float, default=0.5,
+                        help="Tolerancia temporal en segundos: se compara contra una ventana "
+                             "de frames de la referencia y se toma el mejor match (compensa "
+                             "el retraso natural del jugador). 0 = comparacion estricta.")
     parser.add_argument("--backend", choices=["mediapipe", "posenet"], default="mediapipe",
                         help="Detector de pose: mediapipe (CPU, Mac/PC) o posenet (GPU, Jetson)")
     parser.add_argument("--model-complexity", choices=["lite", "full", "heavy"], default="lite",
@@ -546,7 +550,7 @@ def show_final_screen(total_score, score_history, max_combo):
 
 def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
              mirror=True, backend="mediapipe", model_complexity="lite",
-             audio=True, fullscreen=False, infer_every=1):
+             audio=True, fullscreen=False, infer_every=1, tolerance=0.5):
     """Corre una partida completa con un video y su referencia ya extraida.
 
     Es el motor del juego, reutilizable: lo llama tanto el modo CLI directo
@@ -632,6 +636,13 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
     loop_i = 0
     player_poses = []   # ultima deteccion (se reusa entre inferencias)
 
+    # Tolerancia temporal: el jugador reacciona con ~200-500 ms de retraso
+    # respecto a lo que ve. Comparamos contra una ventana de frames de la
+    # referencia (mas hacia atras que adelante) y nos quedamos con el mejor
+    # match, para puntuar el paso y no el desfase.
+    tol_back = max(0, int(tolerance * ref_fps))
+    tol_fwd = tol_back // 3
+
     t_start = time.time()
     print("Empieza el baile! Presiona 'q' para salir, espacio para pausar.")
 
@@ -686,9 +697,14 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
         player_array = None
         if player_poses:
             player_array = player_poses[0]
-            ref_array = ref_landmarks[ref_idx]
-            fs = compare_poses(player_array, ref_array)
-            if fs.valid:
+            lo = max(0, ref_idx - tol_back)
+            hi = min(ref_frame_count - 1, ref_idx + tol_fwd)
+            fs = None
+            for j in range(lo, hi + 1):
+                cand = compare_poses(player_array, ref_landmarks[j])
+                if cand.valid and (fs is None or cand.score > fs.score):
+                    fs = cand
+            if fs is not None:
                 current_score = fs.score
                 instant_label = score_to_label(current_score)
                 score_buffer.append(current_score)
@@ -954,7 +970,7 @@ def main() -> None:
                  mirror=not args.no_mirror, backend=args.backend,
                  model_complexity=args.model_complexity,
                  audio=not args.no_audio, fullscreen=args.fullscreen,
-                 infer_every=args.infer_every)
+                 infer_every=args.infer_every, tolerance=args.tolerance)
         return
 
     # --- Modo menu: escanea la carpeta de videos en cada vuelta ---
@@ -983,7 +999,7 @@ def main() -> None:
                  mirror=not args.no_mirror, backend=args.backend,
                  model_complexity=args.model_complexity,
                  audio=not args.no_audio, fullscreen=args.fullscreen,
-                 infer_every=args.infer_every)
+                 infer_every=args.infer_every, tolerance=args.tolerance)
 
     cv2.destroyAllWindows()
 

@@ -146,7 +146,7 @@ def compare_poses(
     player_pose: np.ndarray,
     reference_pose: np.ndarray,
     visibility_threshold: float = 0.4,
-    tolerance_degrees: float = 30.0,
+    tolerance_degrees: float = 40.0,
 ) -> FrameScore:
     """Compara la pose del jugador contra la de referencia.
 
