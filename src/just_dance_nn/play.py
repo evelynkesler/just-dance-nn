@@ -512,7 +512,7 @@ def show_final_screen(total_score, score_history, max_combo):
                  BG_PANEL_LIGHT, radius=14, thickness=-1)
     put_centered_text(canvas, f"MAX COMBO  {max_combo}",
                       stats_y + 5, 0.9, ACCENT_PINK, 2)
-    put_centered_text(canvas, f"FRAMES VALIDOS  {len(score_history)}",
+    put_centered_text(canvas, f"FRAMES EVALUADOS  {len(score_history)}",
                       stats_y + 40, 0.7, TEXT_DIM, 1)
 
     # Mini grafico de evolucion
@@ -710,8 +710,13 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
             if best is not None:
                 current_score = best
                 instant_label = score_to_label(current_score)
-                score_buffer.append(current_score)
-                score_history.append(current_score)
+
+        # TODOS los frames cuentan para el promedio (0 si no hay jugador
+        # detectado o la comparacion no fue confiable): no bailar = 0 puntos.
+        # Durante la pausa no se acumula score.
+        if not paused:
+            score_buffer.append(current_score)
+            score_history.append(current_score)
 
         smoothed_score = float(np.mean(score_buffer)) if score_buffer else 0.0
         avg_score = float(np.mean(score_history)) if score_history else 0.0
