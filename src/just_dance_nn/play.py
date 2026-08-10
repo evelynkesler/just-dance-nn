@@ -29,8 +29,9 @@ from just_dance_nn.pose_compare import (
     NUM_KEYPOINTS,
     POSE_CONNECTIONS,
     VIS_IDX,
-    compare_poses,
+    best_score_in_window,
     mirror_pose,
+    precompute_reference,
     score_to_label,
 )
 
@@ -574,6 +575,10 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
         print("Modo espejo activado.")
         ref_landmarks = np.stack([mirror_pose(p) for p in ref_landmarks])
 
+    # Pre-calculo de angulos/visibilidad de toda la referencia (una vez).
+    print("Preparando referencia...")
+    ref_angles_all, ref_valid_all = precompute_reference(ref_landmarks)
+
     cap_ref = cv2.VideoCapture(str(video))
     if not cap_ref.isOpened():
         raise SystemExit("No se pudo abrir el video de referencia")
@@ -699,13 +704,11 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
             player_array = player_poses[0]
             lo = max(0, ref_idx - tol_back)
             hi = min(ref_frame_count - 1, ref_idx + tol_fwd)
-            fs = None
-            for j in range(lo, hi + 1):
-                cand = compare_poses(player_array, ref_landmarks[j])
-                if cand.valid and (fs is None or cand.score > fs.score):
-                    fs = cand
-            if fs is not None:
-                current_score = fs.score
+            best = best_score_in_window(player_array,
+                                        ref_angles_all[lo:hi + 1],
+                                        ref_valid_all[lo:hi + 1])
+            if best is not None:
+                current_score = best
                 instant_label = score_to_label(current_score)
                 score_buffer.append(current_score)
                 score_history.append(current_score)

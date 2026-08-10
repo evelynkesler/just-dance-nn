@@ -190,6 +190,51 @@ def compare_poses(
     return FrameScore(score=avg_score, angle_errors=angle_errors, valid=True)
 
 
+def joints_visibility_mask(pose_array, visibility_threshold=0.4):
+    """Mascara (NUM_ANGLES,) de articulaciones cuyos 3 puntos son visibles."""
+    mask = np.zeros(NUM_ANGLES, dtype=bool)
+    for i, (_, a, v, b) in enumerate(JOINT_ANGLES):
+        mask[i] = (
+            pose_array[a, VIS_IDX] >= visibility_threshold
+            and pose_array[v, VIS_IDX] >= visibility_threshold
+            and pose_array[b, VIS_IDX] >= visibility_threshold
+        )
+    return mask
+
+
+def precompute_reference(ref_landmarks, visibility_threshold=0.4):
+    """Pre-calcula angulos y visibilidad de TODA la referencia, una sola vez.
+
+    Permite que la comparacion con ventana temporal en el juego sea una unica
+    operacion vectorizada de numpy por frame (clave para la Jetson).
+    """
+    angles = np.stack([extract_angles(p) for p in ref_landmarks])
+    valid = np.stack([joints_visibility_mask(p, visibility_threshold)
+                      for p in ref_landmarks])
+    return angles, valid
+
+
+def best_score_in_window(player_pose, ref_angles_win, ref_valid_win,
+                         tolerance_degrees=40.0, visibility_threshold=0.4):
+    """Compara al jugador contra una ventana de frames de referencia
+    (angulos pre-calculados) y devuelve el mejor score, o None si ninguna
+    comparacion fue confiable. Vectorizado sobre toda la ventana."""
+    player_angles = extract_angles(player_pose)
+    player_valid = joints_visibility_mask(player_pose, visibility_threshold)
+
+    valid = ref_valid_win & player_valid[None, :]          # (W, A)
+    counts = valid.sum(axis=1)                             # (W,)
+    ok = counts > 0
+    if not ok.any():
+        return None
+
+    err = np.abs(ref_angles_win - player_angles[None, :])  # (W, A)
+    per_joint = np.clip(1.0 - err / tolerance_degrees, 0.0, 1.0)
+    sums = (per_joint * valid).sum(axis=1)
+    scores = np.where(ok, sums / np.maximum(counts, 1) * 100.0, -1.0)
+    return float(scores.max())
+
+
 def score_to_label(score: float) -> str:
     """Mapea un score numerico a una etiqueta tipo Just Dance."""
     if score >= 90:
