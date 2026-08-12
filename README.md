@@ -91,6 +91,8 @@ La red neuronal utilizada es **MediaPipe Pose Landmarker** (modelo basado en Bla
 
 ### 1. Instalar uv
 
+> **¿Qué es uv?** Es una herramienta que reemplaza a `pip` + `venv` juntos: crea el entorno virtual, instala las dependencias exactas del proyecto y ejecuta los scripts adentro de ese entorno, todo con un solo comando. No hace falta activar el venv a mano ni hacer `pip install` de nada.
+
 ```powershell
 # Windows (PowerShell)
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
@@ -118,6 +120,8 @@ uv sync
 - Descargar Python 3.11 si no lo tenés.
 - Crear el `.venv/` en la raíz del proyecto.
 - Instalar todas las dependencias del `uv.lock` (versiones exactas reproducibles).
+
+> **Importante:** de acá en adelante, todos los comandos del proyecto empiezan con `uv run`. Ese prefijo ejecuta lo que sigue **dentro del entorno del proyecto** (con todas las dependencias disponibles), sin tener que activar el venv. Si al copiar un comando te olvidás del `uv run`, va a fallar con `ModuleNotFoundError` — ese es el síntoma típico. Los comandos hay que correrlos **parados en la carpeta del proyecto** (`just-dance-nn/`).
 
 ### 4. Descargar el modelo de MediaPipe
 
@@ -166,15 +170,31 @@ Reproduce el video con el esqueleto superpuesto. Si el esqueleto sigue siempre a
 ### Paso 3: jugar
 
 ```bash
+uv run python src/just_dance_nn/play.py
+```
+
+Sin argumentos se abre el **menú de selección de canciones**: escanea la carpeta `videos/` en cada vuelta (cualquier `.mp4` nuevo aparece solo) e indica al lado de cada canción si ya tiene referencia (`LISTO`) o no (`FALTA REF.`). Si elegís una sin referencia, se extrae automáticamente la primera vez (puede tardar).
+
+Controles del menú:
+- **W/S o flechas** → mover la selección (**1-9** salta directo a esa canción)
+- **ENTER** → elegir
+- **F** → pantalla completa on/off
+- **Q** → salir
+
+También se puede jugar una canción directa por línea de comandos (útil para recortar con `--start`/`--end`):
+
+```bash
 uv run python src/just_dance_nn/play.py "Video 1 - Happy.mp4" --reference "references/Video 1 - Happy.npz" --start 36 --end 207
 ```
 
-Controles:
+Controles durante el juego:
 - **Espacio** → pausa / reanudar (también pausa el audio)
 - **F** → pantalla completa on/off
 - **Q** → salir antes de tiempo
+- **R** (en la pantalla final) → bailar otra vez
 
 Flags útiles:
+- `--videos-dir` / `--references-dir` → carpetas que usa el menú (default: `videos/` y `references/`).
 - `--no-mirror` → desactiva el modo espejo (por defecto, el video y los landmarks de referencia se espejan para que el jugador imite "lado por lado" como en Just Dance real).
 - `--fullscreen` → arranca en pantalla completa.
 - `--no-audio` → sin sonido. (El audio usa `ffplay`, que viene con **ffmpeg**: `brew install ffmpeg` en Mac. Si no está instalado, el juego avisa y sigue mudo.)
@@ -259,8 +279,7 @@ En el juego real de Just Dance, el video del bailarín se muestra **espejado** p
 - [x] **Audio sincronizado** (`ffplay` como subproceso, pausa con SIGSTOP/SIGCONT, fallback mudo si no hay ffmpeg)
 - [ ] **Esqueleto guía** dibujado sobre el bailarín de la referencia
 - [x] **Selector de canciones** (menú que escanea `videos/`; videos nuevos aparecen solos)
-- [ ] **Tolerancia temporal**: comparar contra ±N frames y quedarse con el mejor match (más perdonador)
-- [ ] **Multi-jugador** con identificación persistente (tracking de identidad entre frames)
+- [x] **Tolerancia temporal**: comparar contra ±N frames y quedarse con el mejor match (más perdonador)
 
 ### Despliegue
 
