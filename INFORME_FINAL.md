@@ -180,6 +180,58 @@ Dos ajustes surgidos de pruebas con jugadores reales:
 de la misma canción: 53 → 70.5, con el desglose mostrando la mejora por
 articulación).
 
+### 5.6 Una estatua sacaba PERFECT
+
+**Problema.** La comparación es de poses estáticas: un jugador parado quieto
+en pose neutra (brazos colgando) puntuaba alto cada vez que la coreografía
+pasaba cerca de una pose parecida, y la ventana temporal —que elige el mejor
+frame del rango— lo amplificaba. Simulado contra las 6 referencias: media de
+77–86/100 y hasta 39 % de frames PERFECT sin mover un dedo.
+
+**Solución.** **Gate de movimiento** (`movement_factor()` en
+`pose_compare.py`): se compara cuánto se movió cada articulación (rango del
+ángulo en los últimos 0.5 s) del jugador contra lo que se movió la referencia.
+Si la coreografía se mueve (> 20°) y el jugador no, el score del frame se
+multiplica por un factor que baja hasta 0.15. Al movimiento del jugador se le
+descuentan 10° de jitter de detección, y alcanza con el 40 % de la amplitud de
+la referencia para no ser penalizado (no hace falta clavar la amplitud del
+bailarín profesional). Complemento: la ventana temporal se achicó de 0.5 s a
+0.3 s, porque era el principal amplificador del problema.
+
+**Resultado medido (simulación):** la "estatua" pasó de media 77–86 a 9–17
+(94–99 % de MISS); un "bailarín bueno" simulado (la propia referencia con
+250 ms de retraso y jitter de cámara) conserva media 91–96 con 70–87 % de
+PERFECT.
+
+### 5.7 Mover una mano con medio cuerpo fuera de cámara daba PERFECT
+
+**Problema.** El score promedia solo las articulaciones visibles en ambas
+poses. Con las piernas fuera del encuadre, el jugador quedaba evaluado
+únicamente por brazos y hombros: saludando con una mano se veían frames de
+PERFECT (en simulación, el score instantáneo tocaba 100 en varias canciones).
+
+**Solución.** **Regla de cobertura**: si el jugador no muestra el cuerpo
+completo (todas las articulaciones que la referencia ofrece en ese frame), el
+frame vale 0 (MISS) — no se puede validar un paso que no se ve. Dos detalles
+de diseño:
+
+- **Gracia de 0.4 s:** la detección parpadea (una rodilla desaparece 1–2
+  frames aunque el jugador esté entero en cámara); la regla solo se aplica si
+  la cobertura incompleta se sostiene. Sin esto, cada parpadeo cortaba el
+  combo con un MISS injusto.
+- **El denominador es lo que ofrece la referencia**, no las 8 articulaciones:
+  si el video de la coreografía tiene un plano cerrado (solo torso), comparar
+  solo el torso es todo lo que se puede hacer y no se castiga al jugador.
+
+Además el juego muestra el aviso "CUERPO INCOMPLETO EN CAMARA" sobre el panel
+del jugador para que corrija el encuadre.
+
+**Resultado medido (simulación):** "saludando sin piernas" pasó de media
+16–28 con frames PERFECT a media 0–4 con 97–100 % de MISS (los pocos frames
+no-MISS coinciden con planos cerrados de la referencia, donde la comparación
+de torso sí es válida); el bailarín de cuerpo entero no cambia, y con
+parpadeos artificiales de visibilidad cada 2 s pierde < 1 % de frames.
+
 ---
 
 ## 6. Características del juego final

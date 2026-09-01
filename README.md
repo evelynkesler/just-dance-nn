@@ -246,11 +246,15 @@ Los **ángulos articulares** son invariantes a esas diferencias. Si la bailarina
 ### Mapeo a score
 
 Por cada ángulo:
-- error de **0°** → 100 % en esa articulación
-- error ≥ **30°** → 0 % en esa articulación
+- error ≤ **12°** → 100 % en esa articulación (zona de gracia: el jitter de la red produce 10–15° de error de base aunque el paso esté clavado)
+- error ≥ **45°** → 0 % en esa articulación
 - valor lineal entremedias
 
 Score del frame = promedio de las articulaciones visibles (las que tienen los 3 puntos involucrados con `visibility ≥ 0.4`).
+
+Además hay un **gate de movimiento**: si la coreografía se está moviendo (el ángulo de referencia cambió más de 20° en el último medio segundo) y el jugador está quieto, el score del frame se reduce hasta MISS. Sin esto, quedarse parado en una pose neutra alcanzaba para sacar PERFECT cada vez que la referencia pasaba cerca de una pose parecida.
+
+Y una **regla de cobertura**: si no se te ve el cuerpo completo (todas las articulaciones que ofrece la referencia en ese momento), el frame es **MISS** — no se puede validar un paso que no se ve. Como el promedio solo mira lo visible, un jugador con las piernas fuera del encuadre era evaluado únicamente por los brazos, y mover una mano podía dar PERFECT. Hay una gracia de 0.4 s para que los parpadeos de la detección (1–2 frames sin una rodilla) no regalen MISS, y aparece el aviso **CUERPO INCOMPLETO EN CAMARA** sobre tu panel para que acomodes el encuadre.
 
 ### Etiquetas
 

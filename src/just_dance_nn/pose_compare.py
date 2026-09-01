@@ -245,6 +245,43 @@ def best_score_in_window(player_pose, ref_angles_win, ref_valid_win,
     return float(scores[best_i]), per_joint[best_i], valid[best_i]
 
 
+def movement_factor(player_movement, ref_movement, valid_mask,
+                    move_threshold_degrees=20.0, jitter_degrees=10.0,
+                    required_fraction=0.4, floor=0.15):
+    """Factor 0..1 que castiga no moverse cuando la coreografia si se mueve.
+
+    La comparacion de poses es estatica: una "estatua" parada en pose neutra
+    puntua alto cada vez que la referencia pasa cerca de una pose parecida
+    (peor aun con la ventana temporal, que elige el mejor frame del rango).
+    Este factor compara CUANTO se movio cada articulacion (rango max-min del
+    angulo, en grados, sobre la ultima ~media ventana de tiempo) del jugador
+    contra lo que se movio la referencia:
+
+    - Solo se miran articulaciones validas donde la referencia se movio mas de
+      move_threshold_degrees (si la coreografia esta quieta, no hay castigo).
+    - Al movimiento del jugador se le descuenta jitter_degrees: el temblor de
+      la deteccion genera movimiento falso aun estando quieto.
+    - No hace falta replicar la amplitud completa de la referencia: con
+      required_fraction de su movimiento ya se alcanza el factor 1.
+    - floor evita que un parpadeo de la deteccion multiplique por 0.
+
+    Args:
+        player_movement: (NUM_ANGLES,) rango de movimiento del jugador (grados).
+        ref_movement: (NUM_ANGLES,) idem para la referencia.
+        valid_mask: (NUM_ANGLES,) articulaciones confiables en la comparacion.
+
+    Returns:
+        float en [floor, 1] para multiplicar el score del frame.
+    """
+    moving = valid_mask & (ref_movement > move_threshold_degrees)
+    if not moving.any():
+        return 1.0
+    required = required_fraction * ref_movement[moving]
+    actual = np.maximum(player_movement[moving] - jitter_degrees, 0.0)
+    ratio = float(np.clip(actual / required, 0.0, 1.0).mean())
+    return floor + (1.0 - floor) * ratio
+
+
 def score_to_label(score: float) -> str:
     """Mapea un score numerico a una etiqueta tipo Just Dance."""
     if score >= 90:

@@ -30,12 +30,24 @@ from just_dance_nn.pose_compare import (
     POSE_CONNECTIONS,
     VIS_IDX,
     best_score_in_window,
+    extract_angles,
     mirror_pose,
+    movement_factor,
     precompute_reference,
     score_to_label,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# Gate de movimiento: ventana (en segundos) sobre la que se mide cuanto se
+# movio cada articulacion, tanto del jugador como de la referencia.
+MOVE_WINDOW_S = 0.5
+
+# Cobertura: si el jugador no muestra el cuerpo completo (todas las
+# articulaciones que ofrece la referencia) durante mas de este tiempo, el
+# frame es MISS: no se puede validar un paso que no se ve. La gracia evita
+# que un parpadeo de la deteccion (1-2 frames) regale MISS.
+COVERAGE_GRACE_S = 0.4
 
 # Layout
 PANEL_W = 640
@@ -84,7 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--infer-every", type=int, default=1,
                         help="Correr la red cada N frames y reusar la pose entre medio "
                              "(N=2 recomendado en la Jetson: mas fluidez, misma jugabilidad)")
-    parser.add_argument("--tolerance", type=float, default=0.5,
+    parser.add_argument("--tolerance", type=float, default=0.3,
                         help="Tolerancia temporal en segundos: se compara contra una ventana "
                              "de frames de la referencia y se toma el mejor match (compensa "
                              "el retraso natural del jugador). 0 = comparacion estricta.")
@@ -591,7 +603,7 @@ def show_final_screen(total_score, score_history, max_combo,
 
 def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
              mirror=True, backend="mediapipe", model_complexity="lite",
-             audio=True, fullscreen=False, infer_every=1, tolerance=0.5):
+             audio=True, fullscreen=False, infer_every=1, tolerance=0.3):
     """Corre una partida completa con un video y su referencia ya extraida.
 
     Es el motor del juego, reutilizable: lo llama tanto el modo CLI directo
@@ -681,6 +693,13 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
     loop_i = 0
     player_poses = []   # ultima deteccion (se reusa entre inferencias)
 
+    # Historial (t, angulos) del jugador para el gate de movimiento, y ventana
+    # equivalente (en frames) sobre la referencia.
+    player_angle_hist = deque()
+    move_win_frames = max(1, int(MOVE_WINDOW_S * ref_fps))
+    coverage_warn_until = 0.0  # aviso "cuerpo incompleto" (con persistencia)
+    last_full_cov_t = -1e9     # ultimo instante con cobertura completa
+
     # Estadisticas finales: por articulacion, por etiqueta y deteccion
     joint_sum = np.zeros(8, dtype=np.float64)
     joint_cnt = np.zeros(8, dtype=np.int64)
@@ -748,6 +767,10 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
         player_array = None
         if player_poses:
             player_array = player_poses[0]
+            player_angle_hist.append((elapsed, extract_angles(player_array)))
+            while (len(player_angle_hist) > 1
+                   and elapsed - player_angle_hist[0][0] > MOVE_WINDOW_S):
+                player_angle_hist.popleft()
             lo = max(0, ref_idx - tol_back)
             hi = min(ref_frame_count - 1, ref_idx + tol_fwd)
             best = best_score_in_window(player_array,
@@ -755,6 +778,28 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
                                         ref_valid_all[lo:hi + 1])
             if best is not None:
                 current_score, pj_scores, pj_valid = best
+                # Cobertura: si no se ve el cuerpo completo, no se puede
+                # saber si el paso es correcto -> MISS (score 0), con una
+                # gracia corta para los parpadeos de la deteccion.
+                ref_cov = int(ref_valid_all[ref_idx].sum())
+                pj_cov = int(pj_valid.sum())
+                if pj_cov >= ref_cov:
+                    last_full_cov_t = elapsed
+                else:
+                    coverage_warn_until = time.time() + 0.5
+                    if elapsed - last_full_cov_t > COVERAGE_GRACE_S:
+                        current_score = 0.0
+                # Gate de movimiento: si la coreografia se esta moviendo y el
+                # jugador no, el score del frame se reduce (una estatua parada
+                # en pose neutra no puede sacar PERFECT).
+                hist_span = elapsed - player_angle_hist[0][0]
+                if hist_span >= 0.6 * MOVE_WINDOW_S:
+                    mv_lo = max(0, ref_idx - move_win_frames)
+                    ref_move = np.ptp(ref_angles_all[mv_lo:ref_idx + 1], axis=0)
+                    player_move = np.ptp(
+                        np.stack([a for _, a in player_angle_hist]), axis=0)
+                    current_score *= movement_factor(player_move, ref_move,
+                                                     pj_valid)
                 instant_label = score_to_label(current_score)
                 if not paused:
                     joint_sum[pj_valid] += pj_scores[pj_valid]
@@ -807,6 +852,9 @@ def run_game(video, reference, start=0.0, end=None, cam_index=0, countdown=3,
 
         panel_label(canvas, "REFERENCIA", 18, 18, ACCENT_CYAN)
         panel_label(canvas, "VOS", PANEL_W + 18, 18, ACCENT_PINK)
+        if time.time() < coverage_warn_until:
+            panel_label(canvas, "CUERPO INCOMPLETO EN CAMARA",
+                        PANEL_W + 18, 52, LABEL_COLORS["MISS"])
 
         fps_count += 1
         if time.time() - fps_t0 >= 1.0:
